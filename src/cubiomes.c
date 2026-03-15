@@ -55,7 +55,7 @@ int cubiomes_locate_climate_extreme(Cubiomes *cubiomes, int32_t x, int32_t z,
   double pmax;
   getParaRange(&cubiomes->g.bn.climate[NP_CONTINENTALNESS], NULL, &pmax, x, z,
                range, range, NULL, NULL);
-  return (int) pmax * 10000;
+  return (int) pmax;
 }
 int cubiomes_test_monte_carlo(Cubiomes *cubiomes, int32_t x, int32_t z,
                               int32_t range, double fraction,

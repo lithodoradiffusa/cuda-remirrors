@@ -553,7 +553,7 @@ struct SeedPosACentre {
   int32_t z;
 };
 
-// ring a ring a rosie, bucket full of SeedPosie
+// ring a ring a rosie, bucket full of SeedPosARing
 struct SeedPosARing {
   // float ring_val[16];
   uint64_t ring_val;
@@ -1324,7 +1324,7 @@ void GpuThread::run() {
       event_filter_0A_med, event_filter_3AC, event_filter_3AR, event_filter_3BC,
       event_filter_3BR, event_filter_island;
 
-  int print_interval = 64; // TODO change back to 64
+  int print_interval = 128;
   double time_seed_1 = 0.0;
   double time_filter_0A_coarse = 0.0;
   double time_filter_0A_med = 0.0;
@@ -1498,13 +1498,13 @@ void GpuThread::run() {
                                  time_filter_3AC + time_filter_3AR +
                                  time_filter_3BR + time_filter_island;
       std::printf("\n");
-      std::printf("seed_1    - %9.3f ms | %6.3f %% | %12" PRIu64
+      std::printf("seed_1     - %9.3f ms | %6.3f %% | %12" PRIu64
                   "                "
                   " |                 "
                   " | %7.3f Msps\n",
                   time_seed_1 * 1e3, time_seed_1 / time_total * 100.0,
                   inputs_seed_1, inputs_seed_1 / time_seed_1 * 1e-6);
-      std::printf("filter_coarse - %9.3f ms | %6.3f %% | %12" PRIu64
+      std::printf("f_coarse   - %9.3f ms | %6.3f %% | %12" PRIu64
                   " -> %12" PRIu64 " | 1 in %11.3f"
                   " | %7.3f Gsps\n",
                   time_filter_0A_coarse * 1e3,
@@ -1565,12 +1565,11 @@ void GpuThread::run() {
                   total_outputs_len_filter_3BR / time_filter_island * 1e-9);
 
       std::printf(
-          "total     - %9.3f ms | %6.3f %% |                             "
+          "total      - %9.3f ms | %6.3f %% |                             "
           " |                 "
-          " | %7.3f Gsps | %6.3f Msps\n",
+          " | %7.3f Gsps ",
           time_total * 1e3, kernel_time_total / time_total * 100.0,
-          inputs_filter_0A_coarse / time_total * 1e-9,
-          inputs_filter_0A_coarse / time_total / 81.0 * 1e-6);
+          inputs_filter_0A_coarse / time_total * 1e-9);
       size_t gpu_outputs_size;
       {
         std::lock_guard lock(outputs.mutex);

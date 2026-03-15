@@ -21,6 +21,7 @@ void cubiomes_free(Cubiomes *cubiomes);
 void cubiomes_apply_seed(Cubiomes *cubiomes, uint64_t seed);
 void cubiomes_apply_climate(Cubiomes *cubiomes, uint64_t seed, uint32_t octaves);
 int cubiomes_is_surrounded(Cubiomes *cubiomes, int startx, int startz, int step, double threshhold);
+int cubiomes_locate_climate_extreme(Cubiomes *cubiomes, int32_t x, int32_t z, int32_t range);
 int cubiomes_test_monte_carlo(Cubiomes *cubiomes, int32_t x, int32_t z, int32_t range, double fraction, double confidence);
 int cubiomes_test_biome_centers(Cubiomes *cubiomes, int32_t x, int32_t z, int32_t range, int32_t min_area, PosArea *out);
 

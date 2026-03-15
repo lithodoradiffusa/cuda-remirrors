@@ -18,8 +18,9 @@ std::optional<CpuOutput> process(Cubiomes *cubiomes, const GpuOutput &input) {
     return {};//{{input.seed, input.x, input.z, 40}};
   }
 
+  int max_cont = cubiomes_locate_climate_extreme(cubiomes, input.x/4, input.z/4, 128); 
   printf("1:4 seed: %lld x: %d z: %d\n", input.seed, input.x, input.z);
-  return {{input.seed, input.x, input.z, 4}};
+  return {{input.seed, input.x, input.z, max_cont}};
 }
 
 CpuThread::CpuThread(int id, GpuOutputs &inputs, CpuOutputs &outputs)

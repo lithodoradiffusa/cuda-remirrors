@@ -7,7 +7,7 @@ The algorithm ReMIRRORS was created by estradying.
 
 
 ## compilation
-to compile: `make`
+to compile: ```make```
 to run:
 ```
 ./main --device 0,1 --threads 1 --output output.txt

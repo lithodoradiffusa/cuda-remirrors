@@ -315,9 +315,44 @@ __device__ void init_noise(ImprovedNoise &noise, XrsrRandom &&random) {
     noise.p[i + j] = b;
   }
 }
+struct DeviceBuffer {
+  void *data;
+  size_t size;
+
+  DeviceBuffer(size_t size) : size(size) { TRY_CUDA(cudaMalloc(&data, size)); }
+
+  ~DeviceBuffer() { TRY_CUDA(cudaFree(data)); }
+};
+
+template <typename T> struct OutputBuffer {
+  T *data;
+  uint32_t &len;
+  uint32_t max_len;
+
+  OutputBuffer(T *data, uint32_t &len, uint32_t max_len)
+      : data(data), len(len), max_len(max_len) {}
+
+  OutputBuffer(const DeviceBuffer &buffer, uint32_t &len)
+      : data((T *)buffer.data), len(len), max_len(buffer.size / sizeof(T)) {}
+
+  OutputBuffer(const OutputBuffer<T> &other)
+      : data(other.data), len(other.len), max_len(other.max_len) {}
+};
+
+template <typename T> struct InputBuffer {
+  const T *data;
+  const uint32_t &len;
+
+  InputBuffer(const T *data, const uint32_t &len) : data(data), len(len) {}
+
+  InputBuffer(const OutputBuffer<T> &buffer)
+      : data(buffer.data), len(buffer.len) {}
+
+  InputBuffer(const InputBuffer<T> &other) : data(other.data), len(other.len) {}
+};
 
 namespace KernelSeed1 {
-constexpr uint32_t threads_per_run = UINT64_C(1) << 14;
+constexpr uint32_t threads_per_run = UINT64_C(1) << 16;
 constexpr uint32_t threads_per_block = 32;
 
 struct Result {
@@ -435,9 +470,11 @@ __device__ void init_octave(const XrsrRandomFork &noise_fork,
 }
 
 __global__
-__launch_bounds__(threads_per_block) void kernel(uint64_t start_seed) {
+__launch_bounds__(threads_per_block) void kernel(InputBuffer<uint64_t> input) {
   uint32_t index = blockIdx.x * blockDim.x + threadIdx.x;
-  uint64_t seed = start_seed + index;
+  if (index / threads_per_block * threads_per_block >= input.len)
+    return;
+  uint64_t seed = input.data[index];
 
   const auto seed_fork = XrsrRandom(seed).fork();
   auto noise_random =
@@ -503,42 +540,6 @@ __launch_bounds__(threads_per_block) void kernel(uint64_t start_seed) {
               &Result::continentalness_8B);
 }
 } // namespace KernelSeed1
-
-struct DeviceBuffer {
-  void *data;
-  size_t size;
-
-  DeviceBuffer(size_t size) : size(size) { TRY_CUDA(cudaMalloc(&data, size)); }
-
-  ~DeviceBuffer() { TRY_CUDA(cudaFree(data)); }
-};
-
-template <typename T> struct OutputBuffer {
-  T *data;
-  uint32_t &len;
-  uint32_t max_len;
-
-  OutputBuffer(T *data, uint32_t &len, uint32_t max_len)
-      : data(data), len(len), max_len(max_len) {}
-
-  OutputBuffer(const DeviceBuffer &buffer, uint32_t &len)
-      : data((T *)buffer.data), len(len), max_len(buffer.size / sizeof(T)) {}
-
-  OutputBuffer(const OutputBuffer<T> &other)
-      : data(other.data), len(other.len), max_len(other.max_len) {}
-};
-
-template <typename T> struct InputBuffer {
-  const T *data;
-  const uint32_t &len;
-
-  InputBuffer(const T *data, const uint32_t &len) : data(data), len(len) {}
-
-  InputBuffer(const OutputBuffer<T> &buffer)
-      : data(buffer.data), len(buffer.len) {}
-
-  InputBuffer(const InputBuffer<T> &other) : data(other.data), len(other.len) {}
-};
 
 struct SeedPos {
   uint32_t seed_index;
@@ -617,6 +618,78 @@ __device__ float warp_reduce_min(float val) {
 #endif
 }
 
+namespace KernelFilterYOffset {
+constexpr uint32_t threads_per_block = 256;
+constexpr uint32_t threads_per_run = UINT64_C(1) << 20;
+__device__ XrsrRandomFork noise_yo_fork(XrsrRandomFork noise_fork) {
+  XrsrRandom rng{noise_fork.lo, noise_fork.hi};
+  rng.nextInternal();
+  return {rng.lo, rng.hi};
+}
+
+constexpr XrsrForkHash octave_yo_fork_hash(XrsrForkHash hash) {
+  XrsrRandom rng{hash.lo, hash.hi};
+  rng.nextInternal();
+  return {rng.lo, rng.hi};
+}
+
+template <OctaveConfig octave_config>
+__device__ float octave_yo_mod1(const XrsrRandomFork &noise_yo_fork) {
+  constexpr auto fork_hash = octave_yo_fork_hash(octave_config.fork_hash);
+
+  return ((uint32_t)noise_yo_fork.from(fork_hash).nextBits(32) & 0xFFFFFF) *
+         5.9604645E-8f;
+}
+
+__global__ __launch_bounds__(threads_per_block) void kernel(
+    uint64_t start_seed, OutputBuffer<uint64_t> outputs) {
+  uint32_t index = blockIdx.x * blockDim.x + threadIdx.x;
+  uint64_t seed = start_seed + index;
+  const auto seed_fork = XrsrRandom(seed).fork();
+  auto noise_random =
+      seed_fork.from(device_chosen_continentalness_config.fork_hash);
+
+  auto noise_a_yo_fork = noise_yo_fork(noise_random.fork());
+  float c_0A_yo = octave_yo_mod1<chosen_continentalness_config.octaves_a[0]>(
+      noise_a_yo_fork);
+  float c_1A_yo = octave_yo_mod1<chosen_continentalness_config.octaves_a[1]>(
+      noise_a_yo_fork);
+  float c_2A_yo = octave_yo_mod1<chosen_continentalness_config.octaves_a[2]>(
+      noise_a_yo_fork);
+
+  auto noise_b_yo_fork = noise_yo_fork(noise_random.fork());
+  float c_0B_yo = octave_yo_mod1<chosen_continentalness_config.octaves_b[0]>(
+      noise_b_yo_fork);
+  float c_1B_yo = octave_yo_mod1<chosen_continentalness_config.octaves_b[1]>(
+      noise_b_yo_fork);
+  float c_2B_yo = octave_yo_mod1<chosen_continentalness_config.octaves_b[2]>(
+      noise_b_yo_fork);
+
+  // TODO: test swapping 1A and 2A scores due to difference in yo plots with
+  // COMMISSION
+  /* COMMISSION score:
+  float score = .35f * abs(c_0A_yo - .5f) + .35f * abs(c_0B_yo - .5f) +
+                .11f * abs(c_1A_yo - .5f) + .11f * abs(c_1B_yo - .5f) +
+                .04f * abs(c_2A_yo - .5f) + .04f * abs(c_2B_yo - .5f);
+  */
+  float score0A = abs(c_0A_yo - .5f);
+  float score0B = abs(c_0B_yo - .5f);
+  float score2 = abs(c_2A_yo - .5f);
+  if (score0A >= 0.15f || score0B >= 0.2f || score2 >= 0.25f)
+    return; // 1 in 2700
+
+  uint32_t result_index = atomicAdd(&outputs.len, 1);
+  if (result_index >= outputs.max_len)
+    return;
+  outputs.data[result_index] = seed;
+}
+
+void run(uint32_t start_seed, OutputBuffer<uint64_t> outputs) {
+  kernel<<<threads_per_run / threads_per_block, threads_per_block>>>(start_seed,
+                                                                     outputs);
+  TRY_CUDA(cudaGetLastError());
+}
+} // namespace KernelFilterYOffset
 namespace KernelFilter0A_Coarse {
 constexpr uint32_t threads_per_block = 256;
 constexpr uint32_t threads_per_seed_sqrt = UINT64_C(1) << 8;
@@ -629,45 +702,52 @@ static_assert(pos_step >= 1);
 static_assert(pos_range <= 60'000'000 / 4);
 
 __global__ __launch_bounds__(threads_per_block) void kernel(
-    uint32_t start_seed_index, OutputBuffer<SeedPos> outputs) {
-  uint32_t index = blockIdx.x * blockDim.x + threadIdx.x;
-  uint32_t seed_index = start_seed_index + index / threads_per_seed;
-  uint32_t pos_index = index % threads_per_seed;
+    InputBuffer<uint64_t> seeds, OutputBuffer<SeedPos> outputs) {
+  // uint32_t index = blockIdx.x * blockDim.x + threadIdx.x;
+
+  uint32_t seeds_len = seeds.len;
+  // uint64_t seed;
 
   __shared__ GradDotTable shared_grad_dot_table;
   if (threadIdx.x < sizeof(shared_grad_dot_table) / sizeof(uint32_t)) {
     reinterpret_cast<uint32_t *>(&shared_grad_dot_table)[threadIdx.x] =
         reinterpret_cast<uint32_t *>(&device_grad_dot_table)[threadIdx.x];
   }
+  for (uint32_t seed_index = blockIdx.x; seed_index < seeds_len;
+       seed_index += gridDim.x) {
 
-  __shared__ KernelSeed1::ResultSampler<1> shared_octaves;
-  if (threadIdx.x < sizeof(shared_octaves) / sizeof(uint32_t)) {
-    reinterpret_cast<uint32_t *>(&shared_octaves)[threadIdx.x] =
-        reinterpret_cast<uint32_t *>(
-            &KernelSeed1::results[seed_index])[threadIdx.x];
+    __syncthreads();
+    // seed = seeds.data[seed_index];
+    __shared__ KernelSeed1::ResultSampler<1> shared_octaves;
+    if (threadIdx.x < sizeof(shared_octaves) / sizeof(uint32_t)) {
+      reinterpret_cast<uint32_t *>(&shared_octaves)[threadIdx.x] =
+          reinterpret_cast<uint32_t *>(
+              &KernelSeed1::results[seed_index])[threadIdx.x];
+    }
+    __syncthreads();
+
+    for (uint32_t pos_index = threadIdx.x; pos_index < threads_per_seed;
+         pos_index += blockDim.x) {
+      uint32_t x_index = pos_index % threads_per_seed_sqrt;
+      uint32_t z_index = pos_index / threads_per_seed_sqrt;
+
+      int32_t x = (int32_t)x_index * pos_step - pos_range / 2;
+      int32_t z = (int32_t)z_index * pos_step - pos_range / 2;
+
+      float val = shared_octaves.sample(shared_grad_dot_table, x, 0, z);
+      if (val >= PREFILTER_THRESHOLD_1)
+        return;
+
+      uint32_t result_index = atomicAdd(&outputs.len, 1);
+      if (result_index >= outputs.max_len)
+        return;
+      outputs.data[result_index] = {seed_index, x, z};
+    }
   }
-  __syncthreads();
-
-  uint32_t x_index = pos_index % threads_per_seed_sqrt;
-  uint32_t z_index = pos_index / threads_per_seed_sqrt;
-
-  int32_t x = (int32_t)x_index * pos_step - pos_range / 2;
-  int32_t z = (int32_t)z_index * pos_step - pos_range / 2;
-
-  float val = shared_octaves.sample(shared_grad_dot_table, x, 0, z);
-  if (val >= PREFILTER_THRESHOLD_1)
-    return;
-
-  uint32_t result_index = atomicAdd(&outputs.len, 1);
-  if (result_index >= outputs.max_len)
-    return;
-  outputs.data[result_index] = {seed_index, x, z};
 }
 
-void run(uint32_t start_seed_index, uint32_t seeds,
-         OutputBuffer<SeedPos> outputs) {
-  kernel<<<seeds * threads_per_seed / threads_per_block, threads_per_block>>>(
-      start_seed_index, outputs);
+void run(InputBuffer<uint64_t> seeds, OutputBuffer<SeedPos> outputs) {
+  kernel<<<2048, threads_per_block>>>(seeds, outputs);
   TRY_CUDA(cudaGetLastError());
 }
 } // namespace KernelFilter0A_Coarse
@@ -748,7 +828,7 @@ void run(InputBuffer<SeedPos> inputs, OutputBuffer<SeedPos> outputs) {
 namespace KernelFilter3B_Centre {
 constexpr uint32_t threads_per_block = 256;
 constexpr uint32_t blocks = 4096;
-constexpr uint32_t threads_per_seed_sqrt = 64; // max 113
+constexpr uint32_t threads_per_seed_sqrt = 114; // max 113
 constexpr uint32_t threads_per_seed =
     threads_per_seed_sqrt * threads_per_seed_sqrt;
 constexpr int32_t pos_step = 524288 / 4;
@@ -1247,6 +1327,7 @@ struct BufferLens {
   uint32_t results_len_filter_3BC;
   uint32_t results_len_filter_3BR;
   uint32_t results_len_filter_island;
+  uint32_t results_len_filter_yoffset;
 };
 
 uint64_t random_start_seed() {
@@ -1273,6 +1354,7 @@ void GpuThread::run() {
   // uint64_t start_seed = 9849470875906027758;
   std::printf("Running device %d at %" PRIu64 "\n", device, start_seed);
 
+  DeviceBuffer buffer_seeds(sizeof(uint64_t) * KernelSeed1::threads_per_run);
   DeviceBuffer buffer_1(UINT32_C(1) << 31);
   DeviceBuffer buffer_2(UINT32_C(1) << 29);
   std::vector<SeedPos> h_buffer;
@@ -1284,6 +1366,11 @@ void GpuThread::run() {
   namespace Filter3BC = KernelFilter3B_Centre;
   namespace Filter3BR = KernelFilter3B_Rings;
   namespace FilterIsland = KernelFilterIsland;
+
+  OutputBuffer<uint64_t> outputs_filter_yoffset(
+      buffer_seeds, device_buffer_lens->results_len_filter_yoffset);
+  uint32_t &host_outputs_filter_yoffset_len =
+      host_buffer_lens.results_len_filter_yoffset;
 
   OutputBuffer<SeedPos> outputs_filter_0A_coarse(
       buffer_1, device_buffer_lens->results_len_filter_0A_coarse);
@@ -1320,11 +1407,12 @@ void GpuThread::run() {
   uint32_t &host_outputs_filter_island_len =
       host_buffer_lens.results_len_filter_island;
 
-  CudaEventWrapper event_start, event_seed_1, event_filter_0A_coarse,
-      event_filter_0A_med, event_filter_3AC, event_filter_3AR, event_filter_3BC,
-      event_filter_3BR, event_filter_island;
+  CudaEventWrapper event_start, event_yoffset, event_seed_1,
+      event_filter_0A_coarse, event_filter_0A_med, event_filter_3AC,
+      event_filter_3AR, event_filter_3BC, event_filter_3BR, event_filter_island;
 
-  int print_interval = 128;
+  int print_interval = 1024;
+  double time_yoffset = 0.0;
   double time_seed_1 = 0.0;
   double time_filter_0A_coarse = 0.0;
   double time_filter_0A_med = 0.0;
@@ -1333,6 +1421,8 @@ void GpuThread::run() {
   double time_filter_3AR = 0.0;
   double time_filter_3BR = 0.0;
   double time_filter_island = 0.0;
+  uint64_t inputs_yoffset = 0;
+  uint64_t total_outputs_len_filter_yoffset = 0;
   uint64_t inputs_seed_1 = 0;
   uint64_t inputs_filter_0A_coarse = 0;
   uint64_t total_outputs_len_filter_0A_coarse = 0;
@@ -1354,25 +1444,21 @@ void GpuThread::run() {
 
     event_start.record();
 
-    if (start_seed_index >= KernelSeed1::threads_per_run) {
-      inputs_seed_1 += KernelSeed1::threads_per_run;
+    KernelFilterYOffset::run(start_seed, outputs_filter_yoffset);
+    start_seed += KernelFilterYOffset::threads_per_run;
+    TRY_CUDA(cudaGetLastError());
+
+    event_yoffset.record();
+    {
       KernelSeed1::kernel<<<KernelSeed1::threads_per_run /
                                 KernelSeed1::threads_per_block,
-                            KernelSeed1::threads_per_block>>>(start_seed);
-      TRY_CUDA(cudaGetLastError());
-      currently_used_start_seed = start_seed;
-      start_seed += KernelSeed1::threads_per_run;
-      start_seed_index = 0;
+                            KernelSeed1::threads_per_block>>>(
+          outputs_filter_yoffset);
     }
     event_seed_1.record();
 
     {
-      uint32_t seeds = std::min(KernelSeed1::threads_per_run - start_seed_index,
-                                outputs_filter_0A_coarse.max_len * 16 /
-                                    Filter0ACoarse::threads_per_seed);
-      inputs_filter_0A_coarse += seeds * Filter0ACoarse::threads_per_seed;
-      Filter0ACoarse::run(start_seed_index, seeds, outputs_filter_0A_coarse);
-      start_seed_index += seeds;
+      Filter0ACoarse::run(outputs_filter_yoffset, outputs_filter_0A_coarse);
     }
     event_filter_0A_coarse.record();
     {
@@ -1408,7 +1494,8 @@ void GpuThread::run() {
 
     event_filter_island.synchronize();
 
-    time_seed_1 += event_start.elapsed(event_seed_1) * 1e-3;
+    time_yoffset += event_start.elapsed(event_yoffset);
+    time_seed_1 += event_yoffset.elapsed(event_seed_1) * 1e-3;
     time_filter_0A_coarse +=
         event_seed_1.elapsed(event_filter_0A_coarse) * 1e-3;
     time_filter_0A_med +=
@@ -1418,6 +1505,8 @@ void GpuThread::run() {
     time_filter_3BC += event_filter_3AR.elapsed(event_filter_3BC) * 1e-3;
     time_filter_3BR += event_filter_3BC.elapsed(event_filter_3BR) * 1e-3;
     time_filter_island += event_filter_3BR.elapsed(event_filter_island) * 1e-3;
+
+    total_outputs_len_filter_yoffset += host_outputs_filter_yoffset_len;
     total_outputs_len_filter_0A_coarse += host_outputs_filter_0A_coarse_len;
     total_outputs_len_filter_0A_med += host_outputs_filter_0A_med_len;
     total_outputs_len_filter_3AC += host_outputs_filter_3AC_len;
@@ -1426,6 +1515,12 @@ void GpuThread::run() {
     total_outputs_len_filter_3BR += host_outputs_filter_3BR_len;
     total_outputs_len_filter_island += host_outputs_filter_island_len;
 
+    if (host_outputs_filter_yoffset_len > outputs_filter_yoffset.max_len) {
+      std::printf("outputs_yoffset.len > outputs_yoffset.max_len : %" PRIu32
+                  " > %" PRIu32 "\n",
+                  host_outputs_filter_yoffset_len,
+                  outputs_filter_yoffset.max_len);
+    }
     if (host_outputs_filter_0A_coarse_len > outputs_filter_0A_coarse.max_len) {
       std::printf("outputs_filter_1.len > outputs_filter_1.max_len : %" PRIu32
                   " > %" PRIu32 "\n",
@@ -1480,8 +1575,11 @@ void GpuThread::run() {
       {
         std::lock_guard lock(outputs.mutex);
         for (const auto &result : h_buffer) {
-          outputs.queue.push({currently_used_start_seed + result.seed_index,
-                              result.x * 4, result.z * 4});
+          uint64_t seed;
+          TRY_CUDA(cudaMemcpy(&seed,
+                              &outputs_filter_yoffset.data[result.seed_index],
+                              sizeof(seed), cudaMemcpyDeviceToHost));
+          outputs.queue.push({seed, result.x * 4, result.z * 4});
         }
       }
     }
@@ -1493,26 +1591,35 @@ void GpuThread::run() {
               .count() *
           1e-9;
 
-      double kernel_time_total = time_seed_1 + time_filter_0A_coarse +
-                                 time_filter_0A_med + time_filter_3BC +
-                                 time_filter_3AC + time_filter_3AR +
-                                 time_filter_3BR + time_filter_island;
+      double kernel_time_total =
+          time_yoffset + time_seed_1 + time_filter_0A_coarse +
+          time_filter_0A_med + time_filter_3BC + time_filter_3AC +
+          time_filter_3AR + time_filter_3BR + time_filter_island;
       std::printf("\n");
+      std::printf("f_yoffset   - %9.3f ms | %6.3f %% | %12" PRIu64
+                  " -> %12" PRIu64 " | 1 in %11.3f"
+                  " | %7.3f Gsps\n",
+                  time_yoffset * 1e3, time_yoffset / time_total * 100.0,
+                  inputs_yoffset, total_outputs_len_filter_yoffset,
+                  (double)inputs_yoffset / total_outputs_len_filter_yoffset,
+                  inputs_yoffset / time_yoffset * 1e-9);
       std::printf("seed_1     - %9.3f ms | %6.3f %% | %12" PRIu64
                   "                "
                   " |                 "
                   " | %7.3f Msps\n",
                   time_seed_1 * 1e3, time_seed_1 / time_total * 100.0,
-                  inputs_seed_1, inputs_seed_1 / time_seed_1 * 1e-6);
-      std::printf("f_coarse   - %9.3f ms | %6.3f %% | %12" PRIu64
-                  " -> %12" PRIu64 " | 1 in %11.3f"
-                  " | %7.3f Gsps\n",
-                  time_filter_0A_coarse * 1e3,
-                  time_filter_0A_coarse / time_total * 100.0,
-                  inputs_filter_0A_coarse, total_outputs_len_filter_0A_coarse,
-                  (double)inputs_filter_0A_coarse /
-                      total_outputs_len_filter_0A_coarse,
-                  inputs_filter_0A_coarse / time_filter_0A_coarse * 1e-9);
+                  total_outputs_len_filter_yoffset,
+                  total_outputs_len_filter_yoffset / time_seed_1 * 1e-6);
+      std::printf(
+          "f_coarse   - %9.3f ms | %6.3f %% | %12" PRIu64 " -> %12" PRIu64
+          " | 1 in %11.3f"
+          " | %7.3f Gsps\n",
+          time_filter_0A_coarse * 1e3,
+          time_filter_0A_coarse / time_total * 100.0,
+          total_outputs_len_filter_yoffset, total_outputs_len_filter_0A_coarse,
+          (double)total_outputs_len_filter_yoffset /
+              total_outputs_len_filter_0A_coarse,
+          total_outputs_len_filter_yoffset / time_filter_0A_coarse * 1e-9);
       std::printf(
           "filter_med - %9.3f ms | %6.3f %% | %12" PRIu64 " -> %12" PRIu64
           " | 1 in %11.3f"
@@ -1578,6 +1685,7 @@ void GpuThread::run() {
       std::printf("gpu_outputs.size() = %zu\n", gpu_outputs_size);
 
       start = end;
+      time_yoffset = 0.0;
       time_seed_1 = 0.0;
       time_filter_0A_coarse = 0.0;
       time_filter_0A_med = 0.0;
@@ -1585,8 +1693,11 @@ void GpuThread::run() {
       time_filter_3AC = 0.0;
       time_filter_3AR = 0.0;
       time_filter_3BR = 0.0;
+
       inputs_seed_1 = 0;
+      inputs_yoffset = 0;
       inputs_filter_0A_coarse = 0;
+      total_outputs_len_filter_yoffset = 0;
       total_outputs_len_filter_0A_coarse = 0;
       total_outputs_len_filter_0A_med = 0;
       total_outputs_len_filter_3BC = 0;

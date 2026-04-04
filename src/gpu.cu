@@ -1411,7 +1411,7 @@ void GpuThread::run() {
       event_filter_0A_coarse, event_filter_0A_med, event_filter_3AC,
       event_filter_3AR, event_filter_3BC, event_filter_3BR, event_filter_island;
 
-  int print_interval = 1;
+  int print_interval = 64;
   double time_yoffset = 0.0;
   double time_seed_1 = 0.0;
   double time_filter_0A_coarse = 0.0;

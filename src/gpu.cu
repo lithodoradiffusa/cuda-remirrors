@@ -620,7 +620,7 @@ __device__ float warp_reduce_min(float val) {
 
 namespace KernelFilterYOffset {
 constexpr uint32_t threads_per_block = 256;
-constexpr uint32_t threads_per_run = UINT64_C(1) << 20;
+constexpr uint32_t threads_per_run = UINT64_C(1) << 19;
 __device__ XrsrRandomFork noise_yo_fork(XrsrRandomFork noise_fork) {
   XrsrRandom rng{noise_fork.lo, noise_fork.hi};
   rng.nextInternal();
@@ -674,9 +674,9 @@ __global__ __launch_bounds__(threads_per_block) void kernel(
   */
   float score0A = abs(c_0A_yo - .5f);
   float score0B = abs(c_0B_yo - .5f);
-  float score2 = abs(c_2A_yo - .5f);
-  if (score0A >= 0.15f || score0B >= 0.2f || score2 >= 0.25f)
-    return; // 1 in 2700
+  // float score2 = abs(c_2A_yo - .5f);
+  if (score0A >= 0.15 || score0B >= 0.2) // || score2 >= 0.25f)
+    return;                              // 1 in 2700
 
   uint32_t result_index = atomicAdd(&outputs.len, 1);
   if (result_index >= outputs.max_len)
@@ -684,7 +684,7 @@ __global__ __launch_bounds__(threads_per_block) void kernel(
   outputs.data[result_index] = seed;
 }
 
-void run(uint32_t start_seed, OutputBuffer<uint64_t> outputs) {
+void run(uint64_t start_seed, OutputBuffer<uint64_t> outputs) {
   kernel<<<threads_per_run / threads_per_block, threads_per_block>>>(start_seed,
                                                                      outputs);
   TRY_CUDA(cudaGetLastError());
@@ -736,7 +736,7 @@ __global__ __launch_bounds__(threads_per_block) void kernel(
 
       float val = shared_octaves.sample(shared_grad_dot_table, x, 0, z);
       if (val >= PREFILTER_THRESHOLD_1)
-        return;
+        continue;
 
       uint32_t result_index = atomicAdd(&outputs.len, 1);
       if (result_index >= outputs.max_len)
@@ -812,7 +812,7 @@ __global__ __launch_bounds__(threads_per_block) void kernel(
 
       uint32_t result_index = atomicAdd(&outputs.len, 1);
       if (result_index >= outputs.max_len)
-        continue;
+        return;
       outputs.data[result_index] = {input.seed_index, input.x + x, input.z + z};
     }
   }
@@ -1411,7 +1411,7 @@ void GpuThread::run() {
       event_filter_0A_coarse, event_filter_0A_med, event_filter_3AC,
       event_filter_3AR, event_filter_3BC, event_filter_3BR, event_filter_island;
 
-  int print_interval = 1024;
+  int print_interval = 1;
   double time_yoffset = 0.0;
   double time_seed_1 = 0.0;
   double time_filter_0A_coarse = 0.0;
@@ -1494,7 +1494,7 @@ void GpuThread::run() {
 
     event_filter_island.synchronize();
 
-    time_yoffset += event_start.elapsed(event_yoffset);
+    time_yoffset += event_start.elapsed(event_yoffset) * 1e-3;
     time_seed_1 += event_yoffset.elapsed(event_seed_1) * 1e-3;
     time_filter_0A_coarse +=
         event_seed_1.elapsed(event_filter_0A_coarse) * 1e-3;
@@ -1596,13 +1596,17 @@ void GpuThread::run() {
           time_filter_0A_med + time_filter_3BC + time_filter_3AC +
           time_filter_3AR + time_filter_3BR + time_filter_island;
       std::printf("\n");
-      std::printf("f_yoffset   - %9.3f ms | %6.3f %% | %12" PRIu64
+      std::printf("f_yoffset   - %9.3f ms | %6.3f %% | %12d"
                   " -> %12" PRIu64 " | 1 in %11.3f"
                   " | %7.3f Gsps\n",
                   time_yoffset * 1e3, time_yoffset / time_total * 100.0,
-                  inputs_yoffset, total_outputs_len_filter_yoffset,
-                  (double)inputs_yoffset / total_outputs_len_filter_yoffset,
-                  inputs_yoffset / time_yoffset * 1e-9);
+                  print_interval * KernelFilterYOffset::threads_per_run,
+                  total_outputs_len_filter_yoffset,
+                  (double)print_interval *
+                      KernelFilterYOffset::threads_per_run /
+                      total_outputs_len_filter_yoffset,
+                  print_interval * KernelFilterYOffset::threads_per_run /
+                      time_yoffset * 1e-9);
       std::printf("seed_1     - %9.3f ms | %6.3f %% | %12" PRIu64
                   "                "
                   " |                 "
@@ -1676,7 +1680,8 @@ void GpuThread::run() {
           " |                 "
           " | %7.3f Gsps ",
           time_total * 1e3, kernel_time_total / time_total * 100.0,
-          inputs_filter_0A_coarse / time_total * 1e-9);
+          print_interval * KernelFilterYOffset::threads_per_run / time_total *
+              1e-9);
       size_t gpu_outputs_size;
       {
         std::lock_guard lock(outputs.mutex);
@@ -1689,10 +1694,11 @@ void GpuThread::run() {
       time_seed_1 = 0.0;
       time_filter_0A_coarse = 0.0;
       time_filter_0A_med = 0.0;
+      time_filter_3AR = 0.0;
       time_filter_3BC = 0.0;
       time_filter_3AC = 0.0;
-      time_filter_3AR = 0.0;
       time_filter_3BR = 0.0;
+      time_filter_island = 0.0;
 
       inputs_seed_1 = 0;
       inputs_yoffset = 0;

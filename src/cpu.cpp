@@ -8,6 +8,7 @@ std::optional<CpuOutput> process(Cubiomes *cubiomes, const GpuOutput &input) {
   // return {{ input.seed, input.x, input.z, 0 }};
   // cubiomes_apply_seed(cubiomes, input.seed);
 
+  //printf("unfiltered seed: %lld x: %d z: %d\n", input.seed, input.x, input.z);
   cubiomes_apply_climate(cubiomes, input.seed, 10);
   if (!cubiomes_is_surrounded(cubiomes, input.x, input.z, 40, -1.025)) {
     return {};

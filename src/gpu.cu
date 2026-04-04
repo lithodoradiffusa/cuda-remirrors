@@ -1678,10 +1678,10 @@ void GpuThread::run() {
       std::printf(
           "total      - %9.3f ms | %6.3f %% |                             "
           " |                 "
-          " | %7.3f Gsps ",
+          " | %7.3f Msps ",
           time_total * 1e3, kernel_time_total / time_total * 100.0,
           print_interval * KernelFilterYOffset::threads_per_run / time_total *
-              1e-9);
+              1e-6);
       size_t gpu_outputs_size;
       {
         std::lock_guard lock(outputs.mutex);

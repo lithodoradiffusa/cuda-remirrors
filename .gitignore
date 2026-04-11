@@ -1,2 +1,5 @@
 .clangd
 output.txt
+*.exe
+*.lib
+*.exp
